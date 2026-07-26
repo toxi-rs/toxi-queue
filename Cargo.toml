@@ -1,0 +1,22 @@
+[package]
+name = "toxi-queue"
+version = "3.0.0"
+edition = "2021"
+authors = ["Meshack Bahati Ouma <bahatikylemeshack@gmail.com>"]
+description = "Background job queue with cron scheduling, DLQ, and retry logic for Toxi"
+license = "MIT"
+repository = "https://github.com/meshackbahati/toxi"
+keywords = ["queue", "jobs", "background", "async", "cron"]
+categories = ["asynchronous", "web-programming"]
+
+[dependencies]
+async-trait = "0.1.89"
+chrono = "0.4.42"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+thiserror = "2.0.17"
+tokio = { version = "1.48.0", features = ["full"] }
+uuid = { version = "1.19.0", features = ["v4"] }
+redis = { version = "0.27.6", features = ["tokio-comp"] }
+cron = "0.12"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid"] }
