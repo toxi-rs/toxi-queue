@@ -106,4 +106,4 @@ println!("Failed: {}", stats.total_failed);
 
 ## License
 
-MIT
+MIT OR Apache-2.0
