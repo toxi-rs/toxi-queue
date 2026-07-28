@@ -6,7 +6,7 @@ Background job queue with cron scheduling, DLQ, and retry logic.
 
 ```toml
 [dependencies]
-toxi-queue = "2.3.4"
+toxi-queue = "3.1.0"
 ```
 
 ## Usage

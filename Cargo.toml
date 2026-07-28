@@ -1,6 +1,6 @@
 [package]
 name = "toxi-queue"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2021"
 authors = ["Meshack Bahati Ouma <bahatikylemeshack@gmail.com>"]
 description = "Background job queue with cron scheduling, DLQ, and retry logic for Toxi"
