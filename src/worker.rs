@@ -47,14 +47,14 @@ impl Worker {
                 loop {
                     match queue.dequeue().await {
                         Ok(Some(job)) => {
-                            println!("Worker {}: Processing job {}", i, job.id);
-                            
+                            log::debug!("Worker {}: Processing job {}", i, job.id);
+
                             // In a real implementation, deserialize and execute the job
                             // For now, just mark as complete
                             sleep(Duration::from_millis(100)).await;
-                            
+
                             if let Err(e) = queue.complete(&job.id).await {
-                                eprintln!("Worker {}: Failed to mark job as complete: {}", i, e);
+                                log::warn!("Worker {}: Failed to mark job as complete: {}", i, e);
                             }
                         }
                         Ok(None) => {
@@ -62,7 +62,7 @@ impl Worker {
                             sleep(poll_interval).await;
                         }
                         Err(e) => {
-                            eprintln!("Worker {}: Error dequeuing job: {}", i, e);
+                            log::warn!("Worker {}: Error dequeuing job: {}", i, e);
                             sleep(poll_interval).await;
                         }
                     }

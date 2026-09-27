@@ -1,6 +1,6 @@
 [package]
 name = "toxi-queue"
-version = "3.1.0"
+version = "3.1.1"
 edition = "2021"
 authors = ["Meshack Bahati Ouma <bahatikylemeshack@gmail.com>"]
 description = "Background job queue with cron scheduling, DLQ, and retry logic for Toxi"
@@ -15,6 +15,7 @@ chrono = "0.4.42"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"
+log = "0.4"
 tokio = { version = "1.48.0", features = ["full"] }
 uuid = { version = "1.19.0", features = ["v4"] }
 redis = { version = "0.27.6", features = ["tokio-comp"] }

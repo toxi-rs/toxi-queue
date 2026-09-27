@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use std::collections::VecDeque;
+use chrono::Utc;
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::job::{JobWrapper, JobStatus};
@@ -29,17 +30,89 @@ pub trait QueueBackend: Send + Sync {
     async fn clear(&self) -> Result<()>;
 }
 
-/// In-memory queue backend
+/// In-memory queue backend.
+///
+/// Ready jobs live in a max-heap ordered by priority with FIFO tiebreaks;
+/// future-scheduled jobs wait in a min-heap ordered by due time. Both
+/// enqueue and dequeue cost O(log n) instead of the O(n) scan and memmove
+/// of an ordered vector, while preserving the original semantics: highest
+/// priority first among due jobs, FIFO within equal priority.
 pub struct MemoryBackend {
-    queue: Arc<Mutex<VecDeque<JobWrapper>>>,
+    inner: Arc<Mutex<MemoryQueue>>,
     dead_letter: Arc<Mutex<Vec<JobWrapper>>>,
+}
+
+#[derive(Default)]
+struct MemoryQueue {
+    ready: BinaryHeap<ReadyJob>,
+    delayed: BinaryHeap<DelayedJob>,
+    seq: u64,
+}
+
+struct ReadyJob {
+    priority: i32,
+    seq: u64,
+    job: JobWrapper,
+}
+
+impl PartialEq for ReadyJob {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority && self.seq == other.seq
+    }
+}
+
+impl Eq for ReadyJob {}
+
+impl PartialOrd for ReadyJob {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ReadyJob {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Higher priority first; earlier insertion first on ties.
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| other.seq.cmp(&self.seq))
+    }
+}
+
+struct DelayedJob {
+    due: i64,
+    seq: u64,
+    job: JobWrapper,
+}
+
+impl PartialEq for DelayedJob {
+    fn eq(&self, other: &Self) -> bool {
+        self.due == other.due && self.seq == other.seq
+    }
+}
+
+impl Eq for DelayedJob {}
+
+impl PartialOrd for DelayedJob {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DelayedJob {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Min-heap by due time; earlier insertion first on ties.
+        other
+            .due
+            .cmp(&self.due)
+            .then_with(|| other.seq.cmp(&self.seq))
+    }
 }
 
 impl MemoryBackend {
     /// Create a new in-memory queue backend
     pub fn new() -> Self {
         Self {
-            queue: Arc::new(Mutex::new(VecDeque::new())),
+            inner: Arc::new(Mutex::new(MemoryQueue::default())),
             dead_letter: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -55,28 +128,43 @@ impl Default for MemoryBackend {
 impl QueueBackend for MemoryBackend {
     async fn enqueue(&self, mut job: JobWrapper) -> Result<()> {
         job.status = JobStatus::Pending;
-        let mut queue = self.queue.lock().await;
-        
-        // Insert based on priority (higher priority first)
-        let pos = queue.iter().position(|j| j.priority < job.priority)
-            .unwrap_or(queue.len());
-        queue.insert(pos, job);
-        
+        let mut inner = self.inner.lock().await;
+        let seq = inner.seq;
+        inner.seq = inner.seq.wrapping_add(1);
+
+        let now = Utc::now().timestamp();
+        match job.scheduled_at {
+            Some(due) if due > now => inner.delayed.push(DelayedJob { due, seq, job }),
+            _ => inner.ready.push(ReadyJob {
+                priority: job.priority,
+                seq,
+                job,
+            }),
+        }
+
         Ok(())
     }
 
     async fn dequeue(&self) -> Result<Option<JobWrapper>> {
-        let mut queue = self.queue.lock().await;
-        
-        // Find first job that can be run now
-        let now = chrono::Utc::now().timestamp();
-        let pos = queue.iter().position(|j| {
-            j.status == JobStatus::Pending &&
-            j.scheduled_at.map(|t| t <= now).unwrap_or(true)
-        });
+        let mut inner = self.inner.lock().await;
 
-        if let Some(pos) = pos {
-            let mut job = queue.remove(pos).unwrap();
+        // Promote due jobs before selecting, so scheduled jobs become
+        // visible exactly when their time arrives.
+        let now = Utc::now().timestamp();
+        while let Some(top) = inner.delayed.peek() {
+            if top.due > now {
+                break;
+            }
+            let delayed = inner.delayed.pop().expect("peeked entry exists");
+            inner.ready.push(ReadyJob {
+                priority: delayed.job.priority,
+                seq: delayed.seq,
+                job: delayed.job,
+            });
+        }
+
+        if let Some(ready) = inner.ready.pop() {
+            let mut job = ready.job;
             job.status = JobStatus::Running;
             job.attempts += 1;
             Ok(Some(job))
@@ -125,8 +213,9 @@ impl QueueBackend for MemoryBackend {
     }
 
     async fn clear(&self) -> Result<()> {
-        let mut queue = self.queue.lock().await;
-        queue.clear();
+        let mut inner = self.inner.lock().await;
+        inner.ready.clear();
+        inner.delayed.clear();
         Ok(())
     }
 }
@@ -246,5 +335,85 @@ mod tests {
         let dequeued = queue.dequeue().await.unwrap();
         
         assert!(dequeued.is_some());
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct PriorityJob {
+        value: i32,
+        prio: i32,
+    }
+
+    #[async_trait::async_trait]
+    impl Job for PriorityJob {
+        async fn perform(&self) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn priority(&self) -> i32 {
+            self.prio
+        }
+    }
+
+    async fn dequeue_value(backend: &MemoryBackend) -> Option<i32> {
+        backend
+            .dequeue()
+            .await
+            .unwrap()
+            .map(|job| {
+                serde_json::from_value::<PriorityJob>(job.payload)
+                    .expect("test payload decodes")
+                    .value
+            })
+    }
+
+    #[tokio::test]
+    async fn test_priority_ordering() {
+        let backend = MemoryBackend::new();
+        for (value, prio) in [(1, 0), (2, 10), (3, 5)] {
+            backend
+                .enqueue(JobWrapper::new(&PriorityJob { value, prio }).unwrap())
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(dequeue_value(&backend).await, Some(2));
+        assert_eq!(dequeue_value(&backend).await, Some(3));
+        assert_eq!(dequeue_value(&backend).await, Some(1));
+        assert_eq!(dequeue_value(&backend).await, None);
+    }
+
+    #[tokio::test]
+    async fn test_fifo_within_equal_priority() {
+        let backend = MemoryBackend::new();
+        for value in [1, 2, 3] {
+            backend
+                .enqueue(JobWrapper::new(&PriorityJob { value, prio: 0 }).unwrap())
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(dequeue_value(&backend).await, Some(1));
+        assert_eq!(dequeue_value(&backend).await, Some(2));
+        assert_eq!(dequeue_value(&backend).await, Some(3));
+    }
+
+    #[tokio::test]
+    async fn test_delayed_job_waits_for_due_time() {
+        let backend = MemoryBackend::new();
+        let mut delayed =
+            JobWrapper::new(&PriorityJob { value: 99, prio: 100 }).unwrap();
+        delayed.scheduled_at = Some(chrono::Utc::now().timestamp() + 3600);
+        backend.enqueue(delayed).await.unwrap();
+
+        // Not due: nothing available even though priority is highest.
+        assert_eq!(dequeue_value(&backend).await, None);
+
+        // A ready job dequeues while the delayed one waits.
+        backend
+            .enqueue(JobWrapper::new(&PriorityJob { value: 1, prio: 0 }).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(dequeue_value(&backend).await, Some(1));
+        assert_eq!(dequeue_value(&backend).await, None);
     }
 }
