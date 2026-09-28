@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Meshack Bahati Ouma <bahatikylemeshack@gmail.com>"]
 description = "Background job queue with cron scheduling, DLQ, and retry logic for Toxi"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/meshackbahati/toxi"
+repository = "https://github.com/toxi-rs/toxi-queue"
 keywords = ["queue", "jobs", "background", "async", "cron"]
 categories = ["asynchronous", "web-programming"]
 
